@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="https://glitch.com/favicon.ico" />
+    
+    <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css" />
+
+    <script src="libs/polyfill.js"></script> 
+    <script src="src/svd.js"></script> 
+    <script src="/src/posit1.js"></script> 
+    <script src="/src/cv.js"></script> 
+    <script src="src/aruco.js" defer></script>
+    
+  <script>
+    var video, canvas, context, imageData, detector, posit;    
+ 
+    var markerSize = 150.0; //this should be the real life size in millimetres of your marker
+
+    let selectedItems = {
+        bottom: null,
+        top: null,
+        accessory: null
+    };
+
+    let unlockedItems = {
+        bottom: false,
+        top: false,
+        accessory: false
+    };
+
+    let currentIndices = {
+        bottom: 0,
+        top: 0,
+        accessory: 0
+    };
+
+
+    let indexCountBottom = 0;
+    let indexCountTop = 0;
+    let indexCountA = 0;
+    let outfitRange;
+
+    function getIndicatorColor(range) {
+        switch(range) {
+            case "close":
+                return "yellow";
+            case "medium":
+                return "pink";
+            case "far":
+                return "blue";
+            default:
+                return "gray";
+        }
+    }
+
+    const DIMENSIONS = {
+            clothing: { width: 700, height: 800 },
+            accessory: { width: 1300, height: 1200 }
+    };
+
+    const SCALE_FACTORS = {
+        far: {
+            bottom: { 
+                scale: 0.6,  // Smaller when all ranges unlocked
+                yPosition: 0.95,  // Lower on screen
+                show: true
+            },
+            top: { 
+                scale: 0.6,  // Smaller when all ranges unlocked
+                yPosition: 0.5,  // Middle of screen
+                show: true
+            },
+            accessory: { 
+                scale: 0.6,  // Smaller when all ranges unlocked
+                yPosition: 0.15,  // Top of screen
+                show: true
+            }
+        },
+        medium: {
+            bottom: { 
+                scale: 0.8,  // Larger than far
+                yPosition: 1.1,  // Partially off screen
+                show: true
+            },
+            top: { 
+                scale: 1.0,  // Larger focus
+                yPosition: 0.5,  // Center of screen
+                show: true
+            },
+            accessory: { 
+                scale: 0,  // Hidden
+                yPosition: 0,
+                show: true
+            }
+        },
+        close: {
+            bottom: { 
+                scale: 0,  // Hidden
+                yPosition: 0,
+                show: false
+            },
+            top: { 
+                scale: 1.2,  // Largest
+                yPosition: 0.9,  // Lower, partially cut off
+                show: true
+            },
+            accessory: { 
+                scale: 1.4,  // Largest focus
+                yPosition: 0.4,  // Upper center
+                show: true
+            }
+        }
+    };
+    
+    const DISTANCE_RANGES = {
+      CLOSE: 25,    
+      MEDIUM: 50, 
+      FAR: 60
+    };
+
+    function preloadImages() {
+        imageCache = {
+            bottoms: [],
+            tops: [],
+            accessories: []
+        };
+        
+        for (let i = 1; i <= 4; i++) {
+            const img = new Image();
+            img.src = `src/bottoms/pants${i}.png`;
+            imageCache.bottoms.push(img);
+        }
+        
+        for (let i = 1; i <= 4; i++) {
+            const img = new Image();
+            img.src = `src/tops/top${i}.png`;
+            imageCache.tops.push(img);
+        }
+        
+        for (let i = 1; i <= 3; i++) {
+            const img = new Image();
+            img.src = `src/accessories/accessory${i}.png`;
+            imageCache.accessories.push(img);
+        }
+    }
+
+    function onLoad(){
+      video = document.getElementById("video");
+      canvas = document.getElementById("canvas");
+      context = canvas.getContext("2d");
+    
+      canvas.width = parseInt(canvas.style.width);
+      canvas.height = parseInt(canvas.style.height);    
+      
+      navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: 'environment'
+          }
+        })
+          .then(stream => video.srcObject = stream)
+          .catch(console.error);
+
+        detector = new AR.Detector();
+        posit = new POS.Posit(markerSize, canvas.width);
+
+        requestAnimationFrame(tick);
+        preloadImages();
+    }
+    
+    function tick() {
+        requestAnimationFrame(tick);
+        
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+            snapshot();
+            
+            var markers = detector.detect(imageData);
+            
+            // Draw video first
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            // Then draw clothing
+            if (markers.length >= 2) {
+                const distance = calculateDistance(markers[0].corners, markers[1].corners);
+                const rangeIn = getDistanceRange(distance);
+                if(rangeIn == "close"){  
+                    updateProxemicButton(distance, indexCountA);
+                }
+                else if(rangeIn == "medium"){  
+                    updateProxemicButton(distance, indexCountTop);
+                }
+                else if(rangeIn == "far"){  
+                    updateProxemicButton(distance, indexCountBottom);
+                }
+            }else {
+                // If no markers are visible, use lastKnownRange to maintain state
+                if (lastKnownRange) {
+                    context.save();
+                    drawClothing(lastKnownRange);
+                    context.restore();
+                    
+                    // Update the indicator with the last known state
+                    drawProxemicIndicator(lastButtonStatus);
+                }
+            }
+            
+            // Draw markers and other UI elements if visible
+            if (markers.length > 0) {
+                drawCorners(markers);
+                drawId(markers);
+                drawCornerPosition(markers);
+                showDistance(markers);
+                showOrientation(markers, distance);
+            }
+        }
+    }
+
+    function drawClothing(range) {
+        const canvasWidth = canvas.width;
+        const canvasHeight = canvas.height;
+        
+        // Helper function to draw individual items with visibility check
+        function drawItem(item, type, scaleInfo) {
+            if (!scaleInfo.show || !scaleInfo.scale) return; // Don't draw if hidden
+            
+            const originalDims = type === 'accessory' ? DIMENSIONS.accessory : DIMENSIONS.clothing;
+            const ratio = originalDims.height / originalDims.width;
+            const newWidth = canvasWidth * scaleInfo.scale;
+            const newHeight = newWidth * ratio;
+            
+            const x = (canvasWidth - newWidth) / 2;
+            const y = canvasHeight * scaleInfo.yPosition - (newHeight / 2);
+            
+            context.drawImage(item, x, y, newWidth, newHeight);
+        }
+        
+        // Determine which ranges have been unlocked
+        const hasClose = unlockedItems.accessory;
+        const hasMedium = unlockedItems.top;
+        const hasFar = unlockedItems.bottom;
+        
+        // Adjust scale factors based on unlocked ranges
+        let effectiveScaleFactors = JSON.parse(JSON.stringify(SCALE_FACTORS[range]));
+        
+        if (range === 'far') {
+            if (!hasMedium && !hasClose) {
+                // Only show bottom at larger size
+                effectiveScaleFactors.bottom.scale = 0.6;
+                effectiveScaleFactors.bottom.yPosition = 0.98;
+                effectiveScaleFactors.top.show = false;
+                effectiveScaleFactors.accessory.show = false;
+            } else if (hasMedium && !hasClose) {
+                // Show bottom and top at medium size
+                effectiveScaleFactors.bottom.scale = 0.6;
+                effectiveScaleFactors.bottom.yPosition = 0.98;
+                effectiveScaleFactors.top.scale = 0.48;
+                effectiveScaleFactors.top.yPosition = 0.58;
+                effectiveScaleFactors.accessory.show = false;
+            }
+            else{
+                effectiveScaleFactors.bottom.scale = 0.6;
+                effectiveScaleFactors.bottom.yPosition = 0.98;
+                effectiveScaleFactors.top.scale = 0.48;
+                effectiveScaleFactors.top.yPosition = 0.58;
+                effectiveScaleFactors.accessory.scale = 0.15;
+                effectiveScaleFactors.accessory.yPosition = 0.19;
+            }
+        } else if (range === 'medium') {
+            if (!hasClose) {
+                // Larger top, bottom partially off screen
+                effectiveScaleFactors.bottom.scale = 0.8;
+                effectiveScaleFactors.bottom.yPosition = 1.4;
+                effectiveScaleFactors.top.scale = 0.58;
+                effectiveScaleFactors.top.yPosition = 0.88;
+                effectiveScaleFactors.accessory.show = false;
+            }
+            else if (hasClose){
+                effectiveScaleFactors.bottom.scale = 0.8;
+                effectiveScaleFactors.bottom.yPosition = 1.4;
+                effectiveScaleFactors.top.scale = 0.58;
+                effectiveScaleFactors.top.yPosition = 0.88;
+                effectiveScaleFactors.accessory.scale = 0.2;
+                effectiveScaleFactors.accessory.yPosition = 0.27;
+            }
+        }
+        else if (range === 'close') {
+            effectiveScaleFactors.top.scale = 1;
+            effectiveScaleFactors.top.yPosition = 1.25;
+            effectiveScaleFactors.accessory.scale = 0.3;
+            effectiveScaleFactors.accessory.yPosition = 0.36;
+        }
+        
+        // Draw items in order (bottom to top) if they're unlocked
+        if (unlockedItems.bottom && selectedItems.bottom) {
+            drawItem(selectedItems.bottom, 'bottom', effectiveScaleFactors.bottom);
+        }
+        
+        if (unlockedItems.top && selectedItems.top) {
+            drawItem(selectedItems.top, 'top', effectiveScaleFactors.top);
+        }
+        
+        if (unlockedItems.accessory && selectedItems.accessory) {
+            drawItem(selectedItems.accessory, 'accessory', effectiveScaleFactors.accessory);
+        }
+    }
+
+    function snapshot(){
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    }
+    
+    function calculateDistance(point1, point2) {
+      const xDiff = point2[0] - point1[0];
+      const yDiff = point2[1] - point1[1];
+      const zDiff = point2[2] - point1[2];
+      
+      return Math.sqrt(xDiff * xDiff + yDiff * yDiff + zDiff * zDiff);
+    }
+
+    function getDistanceRange(distance) {
+      if (distance <= DISTANCE_RANGES.CLOSE) {
+        return "close";
+      } else if (distance <= DISTANCE_RANGES.MEDIUM) {
+        return "medium";
+      } else {
+        return "far";
+      }
+    }
+
+    function showDistance(markers) {
+      if (markers.length >= 2) {
+        var corner, corners1, corners2;
+        
+        corners1 = markers[0].corners;
+        corners2 = markers[1].corners;
+
+        // Center the corners on the canvas
+        for (i = 0; i < corners1.length; ++i) {
+          corner = corners1[i];
+          corner.x = corner.x - (canvas.width / 2);
+          corner.y = (canvas.height / 2) - corner.y;
+        }
+        
+        pose1 = posit.pose(corners1);
+        
+        for (i = 0; i < corners2.length; ++i) {
+          corner = corners2[i];
+          corner.x = corner.x - (canvas.width / 2);
+          corner.y = (canvas.height / 2) - corner.y;
+        }
+        
+        pose2 = posit.pose(corners2);
+
+        var d = document.getElementById("distance");
+        var distance = calculateDistance(pose1.bestTranslation, pose2.bestTranslation);
+        outfitRange = getDistanceRange(distance);
+        
+        // Update display with both mm and cm measurements
+        d.innerHTML = `Distance: ${Math.round(distance)}mm (${(distance/10).toFixed(1)}cm) - ${outfitRange}`;
+
+        // Update color based on range
+        switch(outfitRange) {
+          case "close":
+            d.style.color = "red";
+            break;
+          case "medium":
+            d.style.color = "green";
+            break;
+          case "far":
+            d.style.color = "blue";
+            break;
+        }
+
+        if(outfitRange == "far"){
+            updateProxemicButton(distance, indexCountBottom);
+        }
+        if(outfitRange == "medium"){
+            updateProxemicButton(distance, indexCountTop);
+        }
+        if(outfitRange == "close"){
+            updateProxemicButton(distance, indexCountBottom);
+        }
+      }
+    }
+          
+    var lastButtonStatus = ""; 
+
+    function drawProxemicIndicator(status) {
+        const radius = 30;
+        const x = canvas.width - (radius + 20);
+        const y = radius + 20;
+        
+        context.beginPath();
+        context.arc(x, y, radius, 0, 2 * Math.PI);
+        
+        let color;
+
+        switch(status) {
+            case "Too close!":
+            context.fillStyle = "yellow";
+            color = "yellow";
+            lastKnownRange = "close";
+            break;
+            case "Perfect distance":
+            context.fillStyle = "pink";
+            color = "pink";
+            lastKnownRange = "medium";
+            break;
+            case "Come closer":
+            context.fillStyle = "blue";
+            color = "blue";
+            lastKnownRange = "far";
+            break;
+            default:
+                color = lastKnownRange ? getIndicatorColor(lastKnownRange) : "gray";
+        }
+        
+        context.fill();
+        context.strokeStyle = "#000000";
+        context.lineWidth = 3;
+        context.stroke();
+        context.closePath();
+    }
+
+let lastUnlockedCount = 0;
+let lastSelectedItems = { ...selectedItems };
+
+    function updateProxemicButton(distance, index) {
+        const button = document.getElementById("proxemicButton");
+        const range = getDistanceRange(distance);
+
+        if (range) {
+            lastKnownRange = range;
+        }
+
+        const previousUnlockedItems = { ...unlockedItems };
+
+        switch(lastKnownRange) {
+            case "far":
+                if (!unlockedItems.bottom) {
+                    unlockedItems.bottom = true;
+                    selectedItems.bottom = imageCache.bottoms[currentIndices.bottom];
+                }
+                if (unlockedItems.top || unlockedItems.accessory) {
+                    unlockedItems.top = true;
+                    selectedItems.top = imageCache.tops[currentIndices.top];
+                }
+                button.textContent = "Come closer";
+                break;
+
+            case "medium":
+                if (!unlockedItems.top) {
+                    unlockedItems.top = true;
+                    selectedItems.top = imageCache.tops[currentIndices.top];
+                }
+                unlockedItems.bottom = true;
+                selectedItems.bottom = imageCache.bottoms[currentIndices.bottom];
+
+                if (unlockedItems.accessory) {
+                    unlockedItems.accessory = true;
+                    selectedItems.accessory = imageCache.accessories[currentIndices.accessory];
+                }
+                button.textContent = "Perfect distance";
+                break;
+
+            case "close":
+                if (!unlockedItems.accessory) {
+                    unlockedItems.accessory = true;
+                    selectedItems.accessory = imageCache.accessories[currentIndices.accessory];
+                }
+                unlockedItems.top = true;
+                selectedItems.top = imageCache.tops[currentIndices.top];
+                unlockedItems.bottom = false;
+                selectedItems.bottom = null;
+                button.textContent = "Too close!";
+                break;
+        }
+
+        context.save();
+        drawClothing(lastKnownRange);
+        context.restore();
+
+        const unlockedCount = Object.values(unlockedItems).filter(Boolean).length;
+
+        const hasUnlockedCountChanged = unlockedCount !== lastUnlockedCount;
+        const hasSelectedItemsChanged = Object.keys(selectedItems).some(
+            key => selectedItems[key] !== lastSelectedItems[key]
+        );
+
+        if (hasUnlockedCountChanged || hasSelectedItemsChanged) {
+            updateRatingDisplay();
+        }
+
+        lastUnlockedCount = unlockedCount;
+        lastSelectedItems = { ...selectedItems };
+        lastButtonStatus = button.textContent;
+    }
+
+    function updateRatingDisplay() {
+        const ratingPhrases = [
+            { phrase: "Looking like a peach!", stars: 5 },
+            { phrase: "I just LOVE your face in that", stars: 4 },
+            { phrase: "Its giving...mid", stars: 3 },
+            { phrase: "I know you can do better sweetie", stars: 2 },
+            { phrase: "Oh honey, no...", stars: 1 },
+            { phrase: "Dazzling love!", stars: 5 },
+            { phrase: "Don't mind me stealing that <br> outfit sometime", stars: 4 },
+            { phrase: "What would anna wintour say?", stars: 3 },
+            { phrase: "I'm gonna hold your hand when I <br> tell you this...", stars: 2 },
+            { phrase: "Fashion chases you, but you are <br> faster", stars: 1 },
+            { phrase: "This invokes emotions a mirror <br> should be priviledged to feel", stars: 5 },
+            { phrase: "Slay", stars: 4 },
+            { phrase: "Thats alright....for housewear", stars: 3 },
+            { phrase: "Thats a yikes moment", stars: 2 },
+            { phrase: "Womp womp", stars: 1 },
+        ];
+
+        // Randomly select a phrase based on the average rating
+        const randomIndex = Math.floor(Math.random() * ratingPhrases.length);
+        const selectedPhrase = ratingPhrases[randomIndex];
+        averageRating = selectedPhrase.stars; // Update averageRating based on selected phrase's stars
+
+        const ratingDiv = document.querySelector('.rating-box');
+        
+        ratingDiv.innerHTML = `
+            <h2>${selectedPhrase.phrase}</h2>
+            <div>Average: ${averageRating} ⭐</div>
+        `;
+    }
+
+    function drawCorners(markers){
+      var corners, corner, i, j;
+    
+      context.lineWidth = 3;
+
+      for (i = 0; i !== markers.length; ++ i){
+        corners = markers[i].corners;
+        
+        context.strokeStyle = "red";
+        context.beginPath();
+        
+        for (j = 0; j !== corners.length; ++ j){
+          corner = corners[j];
+          context.moveTo(corner.x, corner.y);
+          corner = corners[(j + 1) % corners.length];
+          context.lineTo(corner.x, corner.y);
+        }
+
+        context.stroke();
+        context.closePath();
+        
+        context.strokeStyle = "green";
+        context.strokeRect(corners[0].x - 2, corners[0].y - 2, 4, 4);
+      }
+    }
+
+    function drawId(markers){
+      var corners, corner, x, y, i, j;
+      
+      context.strokeStyle = "green";
+      context.lineWidth = 1;
+      
+      for (i = 0; i !== markers.length; ++ i){
+        corners = markers[i].corners;
+        
+        x = Infinity;
+        y = Infinity;
+        
+        for (j = 0; j !== corners.length; ++ j){
+          corner = corners[j];
+          
+          x = Math.min(x, corner.x);
+          y = Math.min(y, corner.y);
+        }
+
+        context.strokeText(markers[i].id, x, y-10)
+      }
+    }
+
+    function calculateOrientation(corners) {
+        const x1 = corners[0].x;
+        const y1 = corners[0].y;
+        const x2 = corners[1].x;
+        const y2 = corners[1].y;
+        
+        const angle = Math.atan2(y2 - y1, x2 - x1) * (180 / Math.PI);
+        
+        // Normalize angle to 0-90 range
+        const normalizedAngle = Math.abs(angle % 90);
+        
+        return normalizedAngle >= 30 && normalizedAngle <= 60;
+    }
+
+    function showOrientation(markers, distance) {
+        const orientationDiv = document.getElementById("orientation");
+        
+        if (markers.length > 0) {
+            anyMarkerTilted = false;
+            for (let i = 0; i < markers.length; i++) {
+                const isTilted = calculateOrientation(markers[i].corners);
+                if (isTilted) {
+                    anyMarkerTilted = true;
+                    if(outfitRange == "far"){
+                        indexCountBottom = indexCountBottom + 0.1;
+                        if(indexCountBottom >= 3){
+                            indexCountBottom = 0;
+                        }
+                        if(indexCountBottom == 0 || indexCountBottom == 1 || indexCountBottom == 2){
+                            if (unlockedItems.bottom) {
+                                currentIndices.bottom = (currentIndices.bottom + 1) % imageCache.bottoms.length;
+                                selectedItems.bottom = imageCache.bottoms[currentIndices.bottom];
+                            }
+                            updateProxemicButton(distance, indexCountBottom);
+                        }
+                    }
+                    if(outfitRange == "medium"){
+                        indexCountTop = indexCountTop + 0.1;
+                        if(indexCountTop >= 3){
+                            indexCountTop = 0;
+                        }
+                        if(indexCountTop == 0 || indexCountTop == 1 || indexCountTop == 2){
+                            if (unlockedItems.top) {
+                                currentIndices.top = (currentIndices.top + 1) % imageCache.tops.length;
+                                selectedItems.top = imageCache.tops[currentIndices.top];
+                            }
+                            updateProxemicButton(distance, indexCountTop);
+                        }
+                    }
+                    if(outfitRange == "close"){
+                        indexCountA += 0.1;
+                        if(indexCountA >= 2){
+                            indexCountA = 0;
+                        }
+                        if(indexCountA == 0 || indexCountA == 1){
+                            if (unlockedItems.accessory) {
+                                currentIndices.accessory = (currentIndices.accessory + 1) % imageCache.accessories.length;
+                                selectedItems.accessory = imageCache.accessories[currentIndices.accessory];
+                            }
+                            updateProxemicButton(distance, indexCountBottom);
+                        }
+                    }
+                }
+                break;
+                }
+            }
+            
+        orientationDiv.innerHTML = anyMarkerTilted ? "Orientation: Tilted" : "Orientation: Normal";
+        orientationDiv.style.color = anyMarkerTilted ? "orange" : "black";
+    }
+
+    function drawCornerPosition(markers){
+      var corners, corner, x, y, i, j, k, pose;
+      
+      context.strokeStyle = "blue";
+      context.lineWidth = 1;
+      
+      for (i = 0; i !== markers.length; ++ i){
+        corners = markers[i].corners;
+        
+        x = Infinity;
+        y = Infinity;
+        
+        for (j = 0; j !== corners.length; ++ j){
+          corner = corners[j];
+          
+          x = Math.min(x, corner.x);
+          y = Math.min(y, corner.y);
+        }
+
+        for (k = 0; k < corners.length; ++ k){
+          corner = corners[k];
+          corner.x = corner.x - (canvas.width / 2);
+          corner.y = (canvas.height / 2) - corner.y;
+        }
+        
+        pose = posit.pose(corners);
+        var positionInSpace = pose.bestTranslation;
+        context.strokeText(Math.trunc(positionInSpace[0]) + "," + 
+          Math.trunc(positionInSpace[1]) + "," + 
+          Math.trunc(positionInSpace[2]), x, y)
+      }
+    }
+
+    window.onload = onLoad;
+  </script>
+  </head>
+  <div class="layout-container">
+    <div class="camera-section">
+        <video id="video" autoplay="true" style="display:none;"></video>
+        <canvas id="canvas" style="width:640px; height:480px;"></canvas>
+        <h1 class="mirror-title">Mirror Mirror</h1>
+        
+        <div class="rectangle" id="smartUI">
+            <div id="distance">Distance:</div>
+            <div id="orientation">Orientation:</div>
+        </div>
+        
+        <div id="displayStuff" class="info-display">
+            <div id="bestMatched" class="info-item">best matched</div>
+            <div id="customerReviews" class="info-item">reviews</div>
+            <div id="materials" class="info-item">materials</div>
+        </div>
+
+        <div id="displayUI" style="visibility: hidden">
+            <button id="proxemicButton">Waiting for markers...</button>
+        </div>
+    </div>
+
+    <!-- Rating Box -->
+    <div class="rating-box">
+        <h2>Rating Time! Your friendly <br> mirror bot here to check on <br> your look</h2>
+        <div>⭐⭐ Lets Go ⭐⭐</div>
+    </div>
+</div>
+</html>
